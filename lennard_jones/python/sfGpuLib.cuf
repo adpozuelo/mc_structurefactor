@@ -1,0 +1,223 @@
+module sq_mod
+    use iso_c_binding
+    implicit none
+    save
+    real(c_float), parameter :: pi = acos(-1.0_c_float)
+    real(c_float), parameter :: pi2 = acos(-1.0_c_float)**2
+    integer(c_int) :: max_n_k_vectors
+    integer(c_int) :: n_k_vectors
+    integer(c_int) :: n_blocks
+    real(c_float) :: vol
+    real(c_float) :: q_max2
+    real(c_float) :: b_avg2
+    real(c_float) :: cte_norm
+    integer(c_int), dimension(:), allocatable :: binds
+    real(c_float), dimension(:), allocatable :: mod2_k_vectors
+    real(c_float), dimension(:, :), allocatable :: k_vectors
+    real(c_double), dimension(:), allocatable :: S
+contains
+    subroutine reciprocal_space(side, q_max, d_q, n_dim)
+        implicit none
+        integer(c_int), intent(in) :: n_dim
+        real(c_float), intent(in), dimension(n_dim) :: side
+        real(c_float), intent(in) :: q_max
+        real(c_float), intent(in) :: d_q
+
+        integer(c_int) :: i, j, k, i_max, j_max, k_max
+        real(c_float) :: cte_kx, cte_ky, cte_kz, mod2_k_vector, k_vector(n_dim)
+
+        i_max = int((side(1)*q_max)/(2*pi)) + 1
+        j_max = int((side(2)*q_max)/(2*pi)) + 1
+        k_max = int((side(3)*q_max)/(2*pi)) + 1
+        max_n_k_vectors = (2*i_max + 1)*(2*j_max + 1)*(2*k_max + 1)
+        allocate (binds(max_n_k_vectors))
+        allocate (k_vectors(n_dim, max_n_k_vectors))
+        cte_kx = (2*pi)/side(1)
+        cte_ky = (2*pi)/side(2)
+        cte_kz = (2*pi)/side(3)
+        do i = -i_max, i_max
+            do j = -j_max, j_max
+                do k = -k_max, k_max
+                    if ((i == 0) .and. (j == 0) .and. (k == 0)) then
+                        continue
+                    else
+                        k_vector(1) = cte_kx*i
+                        k_vector(2) = cte_ky*j
+                        k_vector(3) = cte_kz*k
+                        mod2_k_vector = sum(k_vector(:)**2)
+                        if ((mod2_k_vector >= 0.0_c_float) .and. (mod2_k_vector < q_max2)) then
+                            n_k_vectors = n_k_vectors + 1
+                            k_vectors(1:n_dim, n_k_vectors) = k_vector(1:n_dim)
+                            binds(n_k_vectors) = int(sqrt(mod2_k_vector)/d_q) + 1
+                        end if
+                    end if
+                end do
+            end do
+        end do
+
+        allocate (mod2_k_vectors(n_k_vectors))
+        do i = 1, n_k_vectors
+            mod2_k_vectors(i) = dot_product(k_vectors(:, i), k_vectors(:, i))
+        end do
+    end subroutine reciprocal_space
+end module sq_mod
+
+module sq_cuda
+    use iso_c_binding
+    implicit none
+    save
+    integer(c_int), device, dimension(:), allocatable :: binds_dev
+    real(c_float), device, dimension(:), allocatable :: b_dev
+    real(c_float), device, dimension(:), allocatable :: mod2_k_vectors_dev
+    real(c_float), device, dimension(:, :), allocatable :: r_xyz_dev
+    real(c_float), device, dimension(:, :), allocatable :: k_vectors_dev
+    real(c_double), device, dimension(:), allocatable :: S_dev
+contains
+    attributes(global) subroutine calc_S_ad_gpu(n_atoms, n_k_vectors)
+        implicit none
+        integer(c_int), intent(in), value :: n_atoms
+        integer(c_int), intent(in), value :: n_k_vectors
+
+        integer(c_int) :: i, j, istat
+        real(c_float) :: q_r
+        real(c_double) :: sin_q, cos_q, tmp
+        cos_q = 0.0_c_double
+        sin_q = 0.0_c_double
+
+        i = (blockidx%x - 1)*blockdim%x + threadidx%x
+        if (i <= n_k_vectors) then
+            do j = 1, n_atoms
+                q_r = dot_product(k_vectors_dev(:, i), r_xyz_dev(:, j))
+                cos_q = cos_q + b_dev(j)*cos(q_r)
+                sin_q = sin_q + b_dev(j)*sin(q_r)
+            end do
+            istat = atomicadd(S_dev(binds_dev(i)), &
+                              ((cos_q**2 + sin_q**2)/mod2_k_vectors_dev(i)))
+        end if
+        return
+    end subroutine calc_S_ad_gpu
+end module sq_cuda
+
+subroutine reciprocalSpace(time_fortran, side, b_scatt_by_sp, q_max, d_q, &
+                n_threads, n_dim, n_species, n_atoms, q_boxes) &
+    bind(C, name="reciprocalSpace")
+    use iso_c_binding
+    use sq_mod
+    implicit none
+    real(c_float), intent(inout) :: time_fortran
+    integer(c_int), intent(in), value :: n_dim
+    integer(c_int), intent(in), value :: q_boxes
+    integer(c_int), intent(in), value :: n_atoms
+    integer(c_int), intent(in), value :: n_species
+    integer(c_int), intent(in), value :: n_threads
+    real(c_float), intent(in), value :: q_max
+    real(c_float), intent(in), value :: d_q
+    real(c_float), dimension(n_dim), intent(in) :: side
+    real(c_float), dimension(n_species), intent(in) :: b_scatt_by_sp
+
+    real(c_float) :: time_start, time_stop
+
+    call cpu_time(time_start)
+    time_fortran = 0.0_c_float
+    vol = product(side)
+    q_max2 = q_max**2
+    b_avg2 = (sum(b_scatt_by_sp)/n_species)**2
+    cte_norm = 2.0_c_float*pi2/(real(n_atoms)*vol*b_avg2*d_q)
+    n_k_vectors = 0
+    call reciprocal_space(side, q_max, d_q, n_dim)
+    n_blocks = n_k_vectors/n_threads
+    if (mod(n_blocks, n_threads) > 0) n_blocks = n_blocks + 1
+    allocate (S(q_boxes))
+    call cpu_time(time_stop)
+    time_fortran = time_stop - time_start
+end subroutine reciprocalSpace
+
+subroutine structureFactor(s_q, time_fortran, r_xyz, side, b, b_scatt_by_sp, &
+                  iter, n_iter, q_max, d_q, n_threads, n_dim, &
+                  n_species, n_atoms, q_boxes) &
+    bind(C, name="structureFactor")
+    use iso_c_binding
+    use cudafor
+    use sq_cuda
+    use sq_mod
+    implicit none
+    real(c_float), intent(inout) :: time_fortran
+    integer(c_int), intent(in), value :: iter
+    integer(c_int), intent(in), value :: n_iter
+    integer(c_int), intent(in), value :: n_dim
+    integer(c_int), intent(in), value :: q_boxes
+    integer(c_int), intent(in), value :: n_atoms
+    integer(c_int), intent(in), value :: n_species
+    integer(c_int), intent(in), value :: n_threads
+    real(c_float), intent(in), value :: q_max
+    real(c_float), intent(in), value :: d_q
+    real(c_float), dimension(n_dim), intent(in) :: side
+    real(c_float), dimension(n_atoms), intent(in) :: b
+    real(c_float), dimension(n_species), intent(in) :: b_scatt_by_sp
+    real(c_float), dimension(n_dim, n_atoms), intent(in) :: r_xyz
+    real(c_double), dimension(q_boxes), intent(inout) :: s_q
+
+    integer(c_int) :: istat
+    real(c_float) :: time_start, time_stop, time_gpu
+    type(cudaEvent) :: time_start_gpu, time_stop_gpu
+
+    call cpu_time(time_start)
+    time_fortran = 0.0_c_float
+    istat = cudaEventCreate(time_start_gpu)
+    istat = cudaEventCreate(time_stop_gpu)
+    
+    select case(iter)
+        case(-1)
+            !print *, '* Fortran: cleaning GPU'
+            call cpu_time(time_stop)
+            time_fortran = time_stop - time_start
+            istat = cudaEventRecord(time_start_gpu, 0)
+            deallocate (mod2_k_vectors, k_vectors, binds, S)
+            deallocate (r_xyz_dev, S_dev, b_dev, k_vectors_dev, &
+                             mod2_k_vectors_dev, binds_dev)
+            istat = cudaEventRecord(time_stop_gpu, 0)
+            istat = cudaEventSynchronize(time_stop_gpu)
+            istat = cudaEventElapsedTime(time_gpu, time_start_gpu, time_stop_gpu)
+            time_fortran = time_fortran + (time_gpu/1000.0_c_float)
+            !print *, '* Fortran: GPU cleaned'
+        case(0)
+            !print *, '* Fortran: initializing GPU'
+            call cpu_time(time_stop)
+            time_fortran = time_stop - time_start
+            istat = cudaEventRecord(time_start_gpu, 0)
+            allocate (k_vectors_dev(n_dim, max_n_k_vectors))
+            allocate (mod2_k_vectors_dev(n_k_vectors))
+            allocate (binds_dev(max_n_k_vectors))
+            allocate (r_xyz_dev(n_dim, n_atoms))
+            allocate (S_dev(q_boxes))
+            allocate (b_dev(n_atoms))
+            mod2_k_vectors_dev = mod2_k_vectors
+            k_vectors_dev = k_vectors  
+            binds_dev = binds
+            b_dev = b
+            S_dev = S
+            istat = cudaEventRecord(time_stop_gpu, 0)
+            istat = cudaEventSynchronize(time_stop_gpu)
+            istat = cudaEventElapsedTime(time_gpu, time_start_gpu, time_stop_gpu)
+            time_fortran = time_fortran + (time_gpu/1000.0_c_float)
+            !print *, '* Fortran: GPU initialized'
+        case default
+            !print *, '* Fortran: iteration ', iter, ' of ', n_iter
+            if (iter == 1) S = 0.0_c_double
+            call cpu_time(time_stop)
+            time_fortran = time_stop - time_start
+            istat = cudaEventRecord(time_start_gpu, 0)
+            if (iter == 1) S_dev = S
+            r_xyz_dev = r_xyz
+            call calc_S_ad_gpu<<<n_blocks, n_threads>>>(n_atoms, n_k_vectors)
+            if (iter == n_iter) S = S_dev
+            istat = cudaEventRecord(time_stop_gpu, 0)
+            istat = cudaEventSynchronize(time_stop_gpu)
+            istat = cudaEventElapsedTime(time_gpu, time_start_gpu, time_stop_gpu)
+            time_fortran = time_fortran + (time_gpu/1000.0_c_float)
+            call cpu_time(time_start)
+            if (iter == n_iter) s_q = S*cte_norm/n_iter
+            call cpu_time(time_stop)
+            time_fortran = time_fortran + (time_stop - time_start)
+    end select
+end subroutine structureFactor

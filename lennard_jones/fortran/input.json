@@ -1,0 +1,20 @@
+{
+  "n_dim": 3,
+  "q_max": 8.0,
+  "d_q": 0.25,
+  "n_iter_avg": 10000,
+  "b_scatt_by_specie": [
+    1.0
+  ],
+  "n_cuda_threads": 128,
+  "lammps_init_file": "init.lammps.nvt",
+  "output_file": "structure_factor.dat.ref",
+  "lammps_cmd_args": [
+    "liblammps",
+    "-sf",
+    "gpu",
+    "-nocite",
+    "-screen",
+    "none"
+  ]
+}

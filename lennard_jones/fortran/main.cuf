@@ -1,0 +1,81 @@
+program mcsf
+   use, intrinsic :: iso_fortran_env, only: sp => real32, dp => real64
+   use mod_common
+   use mod_input
+   use mod_space
+   use mod_sf
+   implicit none
+
+   integer :: argc, iter, io, i
+
+   argc = command_argument_count()
+   if (argc /= 1) then
+      print *, 'mcsf: You must specify only ONE argument: the name of the JSON input file'
+      print *, 'example: mcsf input_file.json'
+      stop
+   end if
+   call get_command_argument(1, input_json_filename)
+
+   print *, new_line('A'), '-> Reading input file: ', input_json_filename
+   call load_json_input_file()
+   print *, 'n_dim: ', n_dim
+   print *, 'q_max: ', q_max
+   print *, 'd_q: ', d_q
+   print *, 'n_iter_avg: ', n_iter_avg
+   print *, 'b_scatt_by_specie: ', b_scatt_by_specie
+   print *, 'n_cuda_threads: ', n_cuda_threads
+   print *, 'output_file: ', output_file
+
+   print *, new_line('A'), '-> Initializing lammps'
+   lmp = lammps(lammps_cmd_args)
+   print *, 'lammps_cmd_args: ', lammps_cmd_args
+   print *, 'LAMMPS Version: ', lmp%version()
+
+   print *, new_line('A'), '-> Loading lammps init file: ', lammps_init_file
+   print *, new_line('A'), '-> Running lammps'
+   call lmp%file(lammps_init_file)
+
+   print *, new_line('A'), '-> Initializing variables'
+   call init_variables()
+   print *, 'n_species: ', n_species
+   print *, 'boxhi: ', boxhi
+   print *, 'q_boxes: ', q_boxes
+   print *, 's_q_len: ', s_q_len
+   print *, 'n_atoms: ', n_atoms
+
+   print *, new_line('A'), '-> Generating reciprocal space'
+   call reciprocal_space(boxhi, b_scatt_by_specie, q_max, d_q, &
+                         n_cuda_threads, n_dim, n_species, n_atoms, q_boxes)
+
+   print *, new_line('A'), '-> Generating structure factor (initialize GPU)'
+   call structure_factor(s_q, atoms, boxhi, b_vec, b_scatt_by_specie, &
+                         0, n_iter_avg, q_max, d_q, n_cuda_threads, n_dim, &
+                         n_species, n_atoms, q_boxes)
+
+   print *, new_line('A'), '-> Generating structure factor (running...)'
+   atoms = lmp%extract_atom('x')
+   do iter = 1, n_iter_avg
+      call structure_factor(s_q, atoms, boxhi, b_vec, b_scatt_by_specie, &
+                            iter, n_iter_avg, q_max, d_q, n_cuda_threads, n_dim, &
+                            n_species, n_atoms, q_boxes)
+      call lmp%command('run 1000')
+      atoms = lmp%extract_atom('x')
+   end do
+
+   print *, new_line('A'), '-> Generating structure factor (cleaning GPU)'
+   call structure_factor(s_q, atoms, boxhi, b_vec, b_scatt_by_specie, &
+                         -1, n_iter_avg, q_max, d_q, n_cuda_threads, n_dim, &
+                         n_species, n_atoms, q_boxes)
+
+   print *, new_line('A'), '-> Closing lammps'
+   call lmp%close(.true.)
+
+   print *, new_line('A'), '-> Writting output file'
+   open (newunit=io, file=output_file, status='replace', action='write')
+   do i = 1, s_q_len
+      write (io, '(2f15.7)') d_q_vec(i), s_q(i)
+   end do
+   close (io)
+   print *, ' '
+
+end program mcsf

@@ -1,0 +1,77 @@
+module mod_space
+   use, intrinsic :: iso_fortran_env, only: sp => real32, dp => real64
+   use mod_common
+   implicit none
+   save
+   real(sp), parameter :: pi = acos(-1.0_sp)
+   real(sp), parameter :: pi2 = acos(-1.0_sp)**2
+   integer :: max_n_k_vectors
+   integer :: n_k_vectors
+   integer :: n_blocks
+   real(sp) :: vol
+   real(sp) :: q_max2
+   real(sp) :: b_avg2
+   real(sp) :: cte_norm
+   integer, dimension(:), allocatable :: binds
+   real(sp), dimension(:), allocatable :: mod2_k_vectors
+   real(sp), dimension(:, :), allocatable :: k_vectors
+   real(dp), dimension(:), allocatable :: S
+contains
+
+   subroutine reciprocal_space(side, b_scatt_by_sp, q_max, d_q, &
+                               n_threads, n_dim, n_species, n_atoms, q_boxes)
+      integer, intent(in), value :: n_dim
+      integer, intent(in), value :: q_boxes
+      integer, intent(in), value :: n_atoms
+      integer, intent(in), value :: n_species
+      integer, intent(in), value :: n_threads
+      real(sp), intent(in), value :: q_max
+      real(sp), intent(in), value :: d_q
+      real(dp), dimension(n_dim), intent(in) :: side
+      real(sp), dimension(n_species), intent(in) :: b_scatt_by_sp
+      integer :: i, j, k, i_max, j_max, k_max
+      real(sp) :: cte_kx, cte_ky, cte_kz, mod2_k_vector, k_vector(n_dim)
+
+      vol = product(side)
+      q_max2 = q_max**2
+      b_avg2 = (sum(b_scatt_by_sp)/n_species)**2
+      cte_norm = 2.0_sp*pi2/(real(n_atoms)*vol*b_avg2*d_q)
+      n_k_vectors = 0
+      i_max = int((side(1)*q_max)/(2*pi)) + 1
+      j_max = int((side(2)*q_max)/(2*pi)) + 1
+      k_max = int((side(3)*q_max)/(2*pi)) + 1
+      max_n_k_vectors = (2*i_max + 1)*(2*j_max + 1)*(2*k_max + 1)
+      allocate (binds(max_n_k_vectors))
+      allocate (k_vectors(n_dim, max_n_k_vectors))
+      cte_kx = (2*pi)/side(1)
+      cte_ky = (2*pi)/side(2)
+      cte_kz = (2*pi)/side(3)
+      do i = -i_max, i_max
+         do j = -j_max, j_max
+            do k = -k_max, k_max
+               if ((i == 0) .and. (j == 0) .and. (k == 0)) then
+                  continue
+               else
+                  k_vector(1) = cte_kx*i
+                  k_vector(2) = cte_ky*j
+                  k_vector(3) = cte_kz*k
+                  mod2_k_vector = sum(k_vector(:)**2)
+                  if ((mod2_k_vector >= 0.0_sp) .and. (mod2_k_vector < q_max2)) then
+                     n_k_vectors = n_k_vectors + 1
+                     k_vectors(1:n_dim, n_k_vectors) = k_vector(1:n_dim)
+                     binds(n_k_vectors) = int(sqrt(mod2_k_vector)/d_q) + 1
+                  end if
+               end if
+            end do
+         end do
+      end do
+      allocate (mod2_k_vectors(n_k_vectors))
+      do i = 1, n_k_vectors
+         mod2_k_vectors(i) = dot_product(k_vectors(:, i), k_vectors(:, i))
+      end do
+      n_blocks = n_k_vectors/n_threads
+      if (mod(n_blocks, n_threads) > 0) n_blocks = n_blocks + 1
+      allocate (S(q_boxes))
+   end subroutine reciprocal_space
+
+end module mod_space

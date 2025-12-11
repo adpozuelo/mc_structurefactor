@@ -1,0 +1,40 @@
+module mod_common
+   use, intrinsic :: iso_fortran_env, only: sp => real32, dp => real64
+   use liblammps
+   implicit none
+   save
+   character(len=128) :: input_json_filename
+   character(len=:), allocatable :: lammps_init_file, output_file
+   character(len=:), allocatable :: lammps_cmd_args(:)
+   real(sp) :: q_max, d_q
+   real(sp), allocatable :: b_scatt_by_specie(:), d_q_vec(:)
+   real(dp), allocatable :: boxlo(:), boxhi(:), s_q(:)
+   real(dp), dimension(:, :), pointer :: atoms => null()
+   integer, dimension(:), pointer :: t_atoms => null()
+   integer :: n_dim, n_iter_avg, n_cuda_threads, s_q_len
+   integer :: q_boxes, n_atoms, n_species
+   real(sp), allocatable :: b_vec(:)
+   TYPE(lammps) :: lmp
+
+contains
+   subroutine init_variables()
+      integer :: i
+      n_species = size(b_scatt_by_specie)
+      allocate (boxlo(n_dim), boxhi(n_dim))
+      call lmp%extract_box(boxlo, boxhi)
+      q_boxes = int(q_max/d_q) + 1
+      allocate (s_q(q_boxes))
+      s_q_len = q_boxes - 1
+      allocate (d_q_vec(q_boxes))
+      do i = 1, q_boxes
+         d_q_vec(i) = d_q/2 + (i - 1)*d_q
+      end do
+      n_atoms = int(lmp%get_natoms())
+      atoms = lmp%extract_atom('x')
+      t_atoms = lmp%extract_atom('type')
+      allocate (b_vec(n_atoms))
+      do i = 1, n_atoms
+         b_vec(i) = b_scatt_by_specie(t_atoms(i))
+      end do
+   end subroutine init_variables
+end module mod_common

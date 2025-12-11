@@ -1,0 +1,46 @@
+module mod_input
+   use, intrinsic :: iso_fortran_env, only: sp => real32, dp => real64
+   use mod_common
+   use :: json_module, rk => json_rk, ik => json_ik, ck => json_ck
+   implicit none
+
+contains
+   subroutine load_json_input_file()
+      real(kind=rk) :: json_q_max, json_d_q
+      real(kind=rk), allocatable :: json_b_scatt_by_specie(:)
+      character(kind=ck, len=:), allocatable :: json_lammps_cmd_args(:)
+      integer(kind=ik), allocatable :: ilen(:)
+      integer(kind=ik) :: json_n_dim, json_n_iter_avg, json_n_cuda_threads
+      type(json_file) :: json
+      logical :: is_found
+
+      call json%initialize()
+      call json%load_file(input_json_filename); if (json%failed()) stop
+      json_block: block
+         call json%get('n_dim', json_n_dim, is_found); if (.not. is_found) exit json_block
+         call json%get('q_max', json_q_max, is_found); if (.not. is_found) exit json_block
+         call json%get('d_q', json_d_q, is_found); if (.not. is_found) exit json_block
+         call json%get('n_iter_avg', json_n_iter_avg, is_found); if (.not. is_found) exit json_block
+         call json%get('b_scatt_by_specie', json_b_scatt_by_specie, is_found); if (.not. is_found) exit json_block
+         call json%get('n_cuda_threads', json_n_cuda_threads, is_found); if (.not. is_found) exit json_block
+         call json%get('lammps_init_file', lammps_init_file, is_found); if (.not. is_found) exit json_block
+         call json%get('output_file', output_file, is_found); if (.not. is_found) exit json_block
+         call json%get('lammps_cmd_args', json_lammps_cmd_args, ilen, is_found); if (.not. is_found) exit json_block
+      end block json_block
+
+      if (.not. is_found) then
+         print *, 'Error: missing parameters in input file: ', input_json_filename
+      else
+         n_dim = json_n_dim
+         q_max = json_q_max
+         d_q = json_d_q
+         n_iter_avg = json_n_iter_avg
+         b_scatt_by_specie = json_b_scatt_by_specie
+         n_cuda_threads = json_n_cuda_threads
+         lammps_cmd_args = json_lammps_cmd_args
+      end if
+
+      call json%destroy()
+   end subroutine load_json_input_file
+
+end module mod_input

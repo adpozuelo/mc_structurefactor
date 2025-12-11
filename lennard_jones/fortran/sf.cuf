@@ -1,0 +1,89 @@
+module mod_sf
+   use, intrinsic :: iso_fortran_env, only: sp => real32, dp => real64
+   use cudafor
+   use mod_space
+   implicit none
+   save
+   integer, device, dimension(:), allocatable :: binds_dev
+   real(sp), device, dimension(:), allocatable :: b_dev
+   real(sp), device, dimension(:), allocatable :: mod2_k_vectors_dev
+   real(sp), device, dimension(:, :), allocatable :: r_xyz_dev
+   real(sp), device, dimension(:, :), allocatable :: k_vectors_dev
+   real(dp), device, dimension(:), allocatable :: S_dev
+
+contains
+   attributes(global) subroutine calc_S_ad_gpu(n_atoms, n_k_vectors)
+      implicit none
+      integer, intent(in), value :: n_atoms
+      integer, intent(in), value :: n_k_vectors
+
+      integer :: i, j, istat
+      real(sp) :: q_r
+      real(dp) :: sin_q, cos_q, tmp
+      cos_q = 0.0_dp
+      sin_q = 0.0_dp
+
+      i = (blockidx%x - 1)*blockdim%x + threadidx%x
+      if (i <= n_k_vectors) then
+         do j = 1, n_atoms
+            q_r = dot_product(k_vectors_dev(:, i), r_xyz_dev(:, j))
+            cos_q = cos_q + b_dev(j)*cos(q_r)
+            sin_q = sin_q + b_dev(j)*sin(q_r)
+         end do
+         istat = atomicadd(S_dev(binds_dev(i)), &
+                           ((cos_q**2 + sin_q**2)/mod2_k_vectors_dev(i)))
+      end if
+      return
+   end subroutine calc_S_ad_gpu
+
+   subroutine structure_factor(s_q, r_xyz, side, b, b_scatt_by_sp, &
+                               iter, n_iter, q_max, d_q, n_threads, n_dim, &
+                               n_species, n_atoms, q_boxes)
+      implicit none
+      integer, intent(in), value :: iter
+      integer, intent(in), value :: n_iter
+      integer, intent(in), value :: n_dim
+      integer, intent(in), value :: q_boxes
+      integer, intent(in), value :: n_atoms
+      integer, intent(in), value :: n_species
+      integer, intent(in), value :: n_threads
+      real(sp), intent(in), value :: q_max
+      real(sp), intent(in), value :: d_q
+      real(dp), dimension(n_dim), intent(in) :: side
+      real(sp), dimension(n_atoms), intent(in) :: b
+      real(sp), dimension(n_species), intent(in) :: b_scatt_by_sp
+      real(dp), dimension(:, :), pointer, intent(in) :: r_xyz
+      real(dp), dimension(q_boxes), intent(inout) :: s_q
+
+      select case (iter)
+      case (-1)
+         ! print *, '* Fortran: cleaning GPU'
+         deallocate (mod2_k_vectors, k_vectors, binds, S)
+         deallocate (r_xyz_dev, S_dev, b_dev, k_vectors_dev, &
+                     mod2_k_vectors_dev, binds_dev)
+         ! print *, '* Fortran: GPU cleaned'
+      case (0)
+         ! print *, '* Fortran: initializing GPU'
+         allocate (k_vectors_dev(n_dim, max_n_k_vectors))
+         allocate (mod2_k_vectors_dev(n_k_vectors))
+         allocate (binds_dev(max_n_k_vectors))
+         allocate (r_xyz_dev(n_dim, n_atoms))
+         allocate (S_dev(q_boxes))
+         allocate (b_dev(n_atoms))
+         mod2_k_vectors_dev = mod2_k_vectors
+         k_vectors_dev = k_vectors
+         binds_dev = binds
+         b_dev = b
+         S_dev = S
+         ! print *, '* Fortran: GPU initialized'
+      case default
+         ! print *, '* Fortran: iteration ', iter, ' of ', n_iter
+         if (iter == 1) S = 0.0_dp
+         if (iter == 1) S_dev = S
+         r_xyz_dev = r_xyz
+         call calc_S_ad_gpu<<<n_blocks, n_threads>>>(n_atoms, n_k_vectors)
+         if (iter == n_iter) S = S_dev
+         if (iter == n_iter) s_q = S*cte_norm/n_iter
+      end select
+   end subroutine structure_factor
+end module mod_sf
